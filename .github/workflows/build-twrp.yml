@@ -70,8 +70,6 @@ jobs:
           javac -version 2>&1 | tee -a preflight-logs/java-version.log
           echo "JAVA_HOME=${JAVA_HOME:-not-set}" | tee -a preflight-logs/java-version.log
 
-          # Parse the quoted version token from standard OpenJDK output,
-          # for example: openjdk version "11.0.29" or java version "11.0.29".
           actual_major="$(
             printf '%s\n' "$version_output" |
               sed -nE 's/^[^"]*"([0-9]+)(\.[0-9]+)*".*/\1/p' |
@@ -152,7 +150,6 @@ jobs:
             echo "schedtool is omitted: it is not in Ubuntu 22.04's official package archive and is an optional scheduler helper, not required for this preflight."
           } 2>&1 | tee preflight-logs/package-availability.log
 
-          # Simulate dependency resolution only; this does not install packages.
           sudo apt-get --simulate install "${packages[@]}" \
             2>&1 | tee preflight-logs/package-install-simulation.log
 
