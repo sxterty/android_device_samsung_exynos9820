@@ -1,0 +1,177 @@
+name: TWRP environment preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - evox16-retrofit-investigation
+
+permissions:
+  contents: read
+
+concurrency:
+  group: twrp-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: Verify Ubuntu 22.04 build environment
+    if: github.ref == 'refs/heads/evox16-retrofit-investigation'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      MANIFEST_URL: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+      MANIFEST_BRANCH: twrp-12.1
+      JAVA_VERSION: '11'
+
+    steps:
+      - name: Confirm branch and record runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p preflight-logs
+
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Commit: $GITHUB_SHA"
+            echo
+            echo "Runner name: ${RUNNER_NAME:-unknown}"
+            echo "Runner OS: ${RUNNER_OS:-unknown}"
+            echo
+            echo "CPU:"
+            nproc
+            echo
+            echo "Memory:"
+            free -h
+            echo
+            echo "Workspace filesystem:"
+            df -hT "$GITHUB_WORKSPACE"
+            echo
+            echo "Workspace filesystem size and available bytes:"
+            df -B1 --output=size,avail "$GITHUB_WORKSPACE"
+          } 2>&1 | tee preflight-logs/runner-resources.log
+
+      - name: Select Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          architecture: x64
+
+      - name: Verify Java version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p preflight-logs
+
+          version_output="$(java -version 2>&1)"
+          printf '%s\n' "$version_output" | tee preflight-logs/java-version.log
+          javac -version 2>&1 | tee -a preflight-logs/java-version.log
+          echo "JAVA_HOME=${JAVA_HOME:-not-set}" | tee -a preflight-logs/java-version.log
+
+          # Parse the quoted version token from standard OpenJDK output,
+          # for example: openjdk version "11.0.29" or java version "11.0.29".
+          actual_major="$(
+            printf '%s\n' "$version_output" |
+              sed -nE 's/^[^"]*"([0-9]+)(\.[0-9]+)*".*/\1/p' |
+              head -n 1
+          )"
+
+          if [[ "$actual_major" != "$JAVA_VERSION" ]]; then
+            echo "Expected Java $JAVA_VERSION, parsed version: ${actual_major:-unrecognized}." \
+              | tee -a preflight-logs/java-version.log
+            exit 1
+          fi
+
+          echo "Java $JAVA_VERSION check passed." | tee -a preflight-logs/java-version.log
+
+      - name: Refresh Ubuntu package indexes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p preflight-logs
+          sudo apt-get update 2>&1 | tee preflight-logs/apt-update.log
+
+      - name: Check required package availability without installing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p preflight-logs
+
+          packages=(
+            bc
+            bison
+            build-essential
+            ccache
+            curl
+            flex
+            g++
+            gcc
+            git
+            git-lfs
+            gnupg
+            gperf
+            imagemagick
+            lib32ncurses5-dev
+            lib32z1-dev
+            libncurses5-dev
+            libncursesw5-dev
+            libssl-dev
+            libxml2-utils
+            lzop
+            pngcrush
+            python-is-python3
+            python3
+            rsync
+            schedtool
+            squashfs-tools
+            xsltproc
+            zip
+            zlib1g-dev
+          )
+
+          {
+            echo "Ubuntu release:"
+            . /etc/os-release
+            echo "${PRETTY_NAME:-unknown}"
+            echo
+            echo "Checking package metadata and candidate versions:"
+            for package in "${packages[@]}"; do
+              candidate="$(
+                apt-cache policy "$package" |
+                  awk '/Candidate:/ { print $2; exit }'
+              )"
+
+              if [[ -z "$candidate" || "$candidate" == "(none)" ]]; then
+                echo "UNAVAILABLE: $package"
+                exit 1
+              fi
+
+              echo "AVAILABLE: $package ($candidate)"
+            done
+          } 2>&1 | tee preflight-logs/package-availability.log
+
+          # Simulate dependency resolution only; this does not install packages.
+          sudo apt-get --simulate install "${packages[@]}" \
+            2>&1 | tee preflight-logs/package-install-simulation.log
+
+      - name: Check TWRP 12.1 manifest branch access
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p preflight-logs
+
+          git ls-remote --exit-code --heads \
+            "$MANIFEST_URL" \
+            "refs/heads/$MANIFEST_BRANCH" \
+            2>&1 | tee preflight-logs/twrp-manifest-access.log
+
+      - name: Upload preflight results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-preflight-logs-${{ github.run_id }}
+          path: preflight-logs/
+          if-no-files-found: warn
+          retention-days: 30
