@@ -1,0 +1,278 @@
+name: Experimental TWRP recovery build - beyond2lte
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - evox16-retrofit-investigation
+
+permissions:
+  contents: read
+
+concurrency:
+  group: twrp-recovery-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build experimental beyond2lte recovery
+    if: github.ref == 'refs/heads/evox16-retrofit-investigation'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      MANIFEST_URL: https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git
+      MANIFEST_BRANCH: twrp-12.1
+      DEVICE_BRANCH: evox16-retrofit-investigation
+      JAVA_VERSION: '11'
+      SOURCE_DIR: ${{ github.workspace }}/twrp
+
+    steps:
+      - name: Confirm branch and record initial runner resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/build-logs"
+
+          {
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Commit: $GITHUB_SHA"
+            echo "Runner: ${RUNNER_NAME:-unknown} (${RUNNER_OS:-unknown})"
+            echo
+            echo "CPU:"
+            nproc
+            echo
+            echo "Memory:"
+            free -h
+            echo
+            echo "Workspace filesystem:"
+            df -hT "$GITHUB_WORKSPACE"
+            echo
+            echo "Workspace bytes (size / available):"
+            df -B1 --output=size,avail "$GITHUB_WORKSPACE"
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/initial-runner-resources.log"
+
+          if [[ "$GITHUB_REF_NAME" != "$DEVICE_BRANCH" ]]; then
+            echo "Refusing to build branch '$GITHUB_REF_NAME'; only '$DEVICE_BRANCH' is allowed." \
+              | tee "$GITHUB_WORKSPACE/build-logs/branch-check.log"
+            exit 1
+          fi
+
+          echo "Branch check passed." | tee "$GITHUB_WORKSPACE/build-logs/branch-check.log"
+
+      - name: Check free disk before source downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/build-logs"
+
+          total_bytes="$(df -B1 --output=size "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')"
+          available_bytes="$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')"
+
+          if [[ ! "$total_bytes" =~ ^[0-9]+$ || ! "$available_bytes" =~ ^[0-9]+$ || "$total_bytes" -eq 0 ]]; then
+            echo "Unable to measure disk space; refusing to download sources." \
+              | tee "$GITHUB_WORKSPACE/build-logs/disk-before-sync.log"
+            exit 1
+          fi
+
+          available_percent=$((available_bytes * 100 / total_bytes))
+          {
+            echo "Total filesystem bytes: $total_bytes"
+            echo "Available bytes before source downloads: $available_bytes"
+            echo "Available percentage: ${available_percent}%"
+            echo "Operational guard: require at least 20% of the measured filesystem to be free."
+            echo "This is a safety/headroom check, not a verified TWRP build-space requirement."
+            df -hT "$GITHUB_WORKSPACE"
+          } | tee "$GITHUB_WORKSPACE/build-logs/disk-before-sync.log"
+
+          if (( available_percent < 20 )); then
+            echo "Insufficient operational disk headroom; stopping before source downloads." \
+              | tee -a "$GITHUB_WORKSPACE/build-logs/disk-before-sync.log"
+            exit 1
+          fi
+
+      - name: Select Java 11
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+          architecture: x64
+
+      - name: Verify Java 11
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_output="$(java -version 2>&1)"
+          {
+            printf '%s\n' "$version_output"
+            javac -version
+            echo "JAVA_HOME=${JAVA_HOME:-not-set}"
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/java-version.log"
+
+          actual_major="$(
+            printf '%s\n' "$version_output" |
+              sed -nE 's/^[^"]*"([0-9]+)(\.[0-9]+)*".*/\1/p' |
+              head -n 1
+          )"
+
+          if [[ "$actual_major" != "$JAVA_VERSION" ]]; then
+            echo "Expected Java $JAVA_VERSION, parsed version: ${actual_major:-unrecognized}." \
+              | tee -a "$GITHUB_WORKSPACE/build-logs/java-version.log"
+            exit 1
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/apt-update.log"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex g++ gcc git git-lfs gnupg gperf \
+            imagemagick lib32ncurses-dev lib32z1-dev libncurses-dev libssl-dev \
+            libxml2-utils lzop pngcrush python-is-python3 python3 rsync \
+            squashfs-tools xsltproc zip zlib1g-dev \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-logs/apt-install.log"
+
+      - name: Install repo tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/bin"
+          curl --fail --location --retry 3 \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            --output "$HOME/bin/repo" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-logs/repo-download.log"
+          chmod a+x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/repo" version 2>&1 | tee -a "$GITHUB_WORKSPACE/build-logs/repo-download.log"
+
+      - name: Initialize TWRP 12.1 manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$SOURCE_DIR"
+          cd "$SOURCE_DIR"
+          repo init --depth=1 -u "$MANIFEST_URL" -b "$MANIFEST_BRANCH" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-logs/repo-init.log"
+
+      - name: Sync TWRP source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          repo sync -c --force-sync --no-clone-bundle --no-tags -j2 \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-logs/repo-sync.log"
+
+      - name: Check free disk after source downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          total_bytes="$(df -B1 --output=size "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')"
+          available_bytes="$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1 | tr -d ' ')"
+
+          if [[ ! "$total_bytes" =~ ^[0-9]+$ || ! "$available_bytes" =~ ^[0-9]+$ || "$total_bytes" -eq 0 ]]; then
+            echo "Unable to measure disk space after source sync; refusing to build." \
+              | tee "$GITHUB_WORKSPACE/build-logs/disk-after-sync.log"
+            exit 1
+          fi
+
+          available_percent=$((available_bytes * 100 / total_bytes))
+          {
+            echo "Total filesystem bytes: $total_bytes"
+            echo "Available bytes after source downloads: $available_bytes"
+            echo "Available percentage: ${available_percent}%"
+            echo "Operational guard: retain at least 20% of the measured filesystem as headroom."
+            echo "This is not a verified TWRP build-space requirement."
+            df -hT "$GITHUB_WORKSPACE"
+          } | tee "$GITHUB_WORKSPACE/build-logs/disk-after-sync.log"
+
+          if (( available_percent < 20 )); then
+            echo "Insufficient operational disk headroom after source sync; stopping before compilation." \
+              | tee -a "$GITHUB_WORKSPACE/build-logs/disk-after-sync.log"
+            exit 1
+          fi
+
+      - name: Add device tree from the requested branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$SOURCE_DIR/device/samsung"
+          git clone --depth=1 --branch "$DEVICE_BRANCH" \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "$SOURCE_DIR/device/samsung/exynos9820" \
+            2>&1 | tee "$GITHUB_WORKSPACE/build-logs/device-tree-clone.log"
+
+          actual_sha="$(git -C "$SOURCE_DIR/device/samsung/exynos9820" rev-parse HEAD)"
+          echo "Device-tree commit: $actual_sha" \
+            | tee "$GITHUB_WORKSPACE/build-logs/device-tree-revision.log"
+
+          if [[ "$actual_sha" != "$GITHUB_SHA" ]]; then
+            echo "Device tree revision does not match the workflow's triggering commit." \
+              | tee -a "$GITHUB_WORKSPACE/build-logs/device-tree-revision.log"
+            exit 1
+          fi
+
+      - name: Build twrp_beyond2lte-eng recoveryimage
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$SOURCE_DIR"
+          export ALLOW_MISSING_DEPENDENCIES=true
+          export OUT_DIR="$SOURCE_DIR/out"
+
+          {
+            source build/envsetup.sh
+            lunch twrp_beyond2lte-eng
+            mka recoveryimage -j2
+          } 2>&1 | tee "$GITHUB_WORKSPACE/build-logs/build.log"
+
+      - name: Collect experimental image and final disk status
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/build-results"
+
+          image="$SOURCE_DIR/out/target/product/beyond2lte/recovery.img"
+          if [[ -f "$image" ]]; then
+            cp "$image" "$GITHUB_WORKSPACE/build-results/recovery.img"
+            sha256sum "$GITHUB_WORKSPACE/build-results/recovery.img" \
+              > "$GITHUB_WORKSPACE/build-results/SHA256SUMS.txt"
+            cat > "$GITHUB_WORKSPACE/build-results/STATUS.txt" <<'EOF'
+          Experimental recovery build artifact.
+          Compatibility with Evolution X 16 and retrofit dynamic partitions is not validated.
+          This image is not represented as safe or ready to install.
+          EOF
+          else
+            echo "No recovery.img was produced. Review the build logs artifact." \
+              > "$GITHUB_WORKSPACE/build-results/BUILD-FAILED.txt"
+          fi
+
+          df -hT "$GITHUB_WORKSPACE" \
+            > "$GITHUB_WORKSPACE/build-results/final-disk-status.txt" 2>&1 || true
+
+      - name: Upload experimental recovery artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-beyond2lte-experimental-${{ github.run_id }}
+          path: |
+            build-results/recovery.img
+            build-results/SHA256SUMS.txt
+            build-results/STATUS.txt
+            build-results/BUILD-FAILED.txt
+            build-results/final-disk-status.txt
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build and failure logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twrp-beyond2lte-build-logs-${{ github.run_id }}
+          path: |
+            build-logs/*.log
+            build-results/BUILD-FAILED.txt
+            build-results/final-disk-status.txt
+          if-no-files-found: warn
+          retention-days: 30
