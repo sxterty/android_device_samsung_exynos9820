@@ -113,10 +113,9 @@ jobs:
             gnupg
             gperf
             imagemagick
-            lib32ncurses5-dev
+            lib32ncurses-dev
             lib32z1-dev
-            libncurses5-dev
-            libncursesw5-dev
+            libncurses-dev
             libssl-dev
             libxml2-utils
             lzop
@@ -124,7 +123,6 @@ jobs:
             python-is-python3
             python3
             rsync
-            schedtool
             squashfs-tools
             xsltproc
             zip
@@ -150,6 +148,8 @@ jobs:
 
               echo "AVAILABLE: $package ($candidate)"
             done
+            echo
+            echo "schedtool is omitted: it is not in Ubuntu 22.04's official package archive and is an optional scheduler helper, not required for this preflight."
           } 2>&1 | tee preflight-logs/package-availability.log
 
           # Simulate dependency resolution only; this does not install packages.
