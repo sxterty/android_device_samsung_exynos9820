@@ -215,7 +215,7 @@ jobs:
       - name: Build twrp_beyond2lte-eng recoveryimage
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           cd "$SOURCE_DIR"
           export ALLOW_MISSING_DEPENDENCIES=true
           export OUT_DIR="$SOURCE_DIR/out"
