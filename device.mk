@@ -17,10 +17,13 @@ PRODUCT_SHIPPING_API_LEVEL := 30
 # No dynamic partitions
 PRODUCT_USE_DYNAMIC_PARTITIONS := false
 
-# fastbootd
+# fastbootd and logical partition tools
 PRODUCT_PACKAGES += \
     android.hardware.fastboot@1.0-impl-mock \
-    fastbootd
+    fastbootd \
+    lpdump \
+    lpmake \
+    lpunpack
 
 PRODUCT_PRODUCT_PROPERTIES += \
 	ro.fastbootd.available=true
